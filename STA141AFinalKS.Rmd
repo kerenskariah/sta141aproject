@@ -1,0 +1,820 @@
+---
+title: "STA 141A Final Project"
+author: "Keren Skariah"
+date: "`r Sys.Date()`"
+output: html_document
+---
+# Predicting Decision Outcomes from Neural Activity in Mice
+# Introduction
+
+This analysis explores whether neural activity and visual stimuli can predict decision outcomes in mice. Understanding this relationship has broader implications for neuroscience, cognitive science, and even real-world applications like brain-computer interfaces and neuro-prosthetics. If neural signals reliably correlate with decision-making, it could deepen our understanding of how the brain processes sensory information and transforms it into actions.  
+
+The dataset, collected by Steinmetz et al. (2019), comes from experiments on 10 mice over 39 sessions. Each session involved hundreds of trials where mice viewed visual stimuli on two screens with varying contrast levels (0, 0.25, 0.5, 1) and used a wheel to indicate their decision. Their choices were followed by feedback—success (1) or failure (-1) and they were based on whether they responded correctly to the stimuli. Neural activity was recorded as spike trains, representing neuron firings, from the reveal of the stimuli to 0.4 seconds after. This analysis focuses on 18 sessions from four mice: Cori, Frossman, Hence, and Lederberg.  
+
+The key question driving this project is whether neural activity and stimulus contrast levels can predict the type of feedback the mice receive. If so, this could provide valuable insights into how sensory input influences decision-making at the neurological level. In the long term, research like this contributes to fields such as AI, where understanding biological decision-making can improve machine learning models, and medicine, where insights from neural activity could help develop treatments for cognitive disorders or enhance neuroprosthetic devices.
+
+## Problem Setup  
+
+This project examines whether neural activity and visual stimuli can predict decision outcomes in mice. The goal is to analyze spike train data and contrast levels to determine their relationship with feedback type (success or failure).  
+
+## Source of Data  
+
+The dataset comes from Steinmetz et al. (2019), which recorded neural activity from mice performing a visual decision-making task. The study involved 10 mice across 39 sessions, but this analysis focuses on 18 sessions from four mice: Cori, Frossman, Hence, and Lederberg.  
+
+## Key Variables  
+
+- **Independent Variables**: 
+  - *contrast_left, contrast_right* – Contrast levels of stimuli (0, 0.25, 0.5, 1)
+  - *brain_area* – Cortical region where spikes were recorded
+
+- **Dependent Variable**:  
+  - *spike trains* – Neural firing activity (timestamped spike trains) 
+  - *feedback* – Success (1) or failure (-1) based on correctness of mouse’s decision
+
+## Possible Hypotheses  
+
+1. Neural activity predicts *decision outcomes* 
+   - If certain patterns of neural firing are associated with correct / incorrect decisions, spike trains should be predictive of feedback type.  
+2. Stimulus contrast influences *decision accuracy* 
+   - Higher contrast differences between screens will lead to more correct choices, while lower contrasts will result in more random / incorrect decisions.  
+3. Brain regions contribute differently to *decision-making *
+   - Some cortical areas may play a stronger role in processing visual input & guiding motor responses
+
+Through testing these hypotheses, this study aims to provide insights into how sensory input / neural activity shape decision-making processes.
+
+# Exploratory Data Analysis
+```{r setup, include=FALSE}
+library(tidyverse)
+library(dplyr)
+library(ggplot2)
+library(readr)
+library(tidyverse)
+library(caret) 
+library(corrplot)
+library(ggcorrplot)
+library(gridExtra) 
+library(knitr)
+```
+
+```{r, include=FALSE}
+session=list()
+for(i in 1:18){
+  session[[i]]=readRDS(paste('./Data/session',i,'.rds',sep=''))
+   # print(session[[i]]$mouse_name)
+   # print(session[[i]]$date_exp)
+}
+```
+
+## Data Structure
+
+```{r, include=FALSE}
+ls(session[[1]]) # List variables in session 1
+```
+I can see the key variables: *brain_area, contrast_left, contrast_right, date_exp, feedback_type, mouse_name, spks*, and *time*. *brain_area* is a list of brain regions for each neuron, the contrasts are numeric, *date_exp* is in date format, *feedback_type* indicates success/failure, *mouse_name* gives the mouse name, *spks* contains the spike trains, and *time* gives the time bins.
+
+```{r, include=FALSE}
+# Function to process a single trial of a session
+process_trial <- function(session_data, session_id, trial_id) {
+  # Extract brain areas and spike train matrix for the trial
+  brain_areas <- session_data$brain_area
+  spks_matrix <- session_data$spks[[trial_id]]
+  
+  # Compute total spikes for each neuron in the trial
+  trial_df <- tibble(
+    brain_area = brain_areas,
+    total_spikes = rowSums(spks_matrix),
+    neuron_id = 1:length(brain_areas)
+  )
+  
+  # Summarize the trial by brain area: total, count, and mean spikes per neuron
+  trial_summary <- trial_df %>%
+    group_by(brain_area) %>%
+    summarize(
+      region_sum_spike = sum(total_spikes),
+      region_count = n(),
+      region_mean_spike = mean(total_spikes),
+      .groups = "drop"
+    ) %>%
+    mutate(
+      session_id = session_id,
+      trial_id = trial_id,
+      contrast_left = session_data$contrast_left[trial_id],
+      contrast_right = session_data$contrast_right[trial_id],
+      feedback_type = session_data$feedback_type[trial_id],
+      mouse_name = session_data$mouse_name
+    )
+  
+  return(trial_summary)
+}
+
+# List all session files (e.g., session1.rds, session2.rds, ..., session18.rds)
+session_files <- list.files(path = "./Data", pattern = "session\\d+\\.rds", full.names = TRUE)
+
+# Read all session files into a list
+session_list <- lapply(session_files, readRDS)
+
+# Process each trial in every session and store the results
+all_sessions_combined <- list()
+for(i in seq_along(session_list)) {
+  current_session <- session_list[[i]]
+  n_trials <- length(current_session$feedback_type)
+  for(j in 1:n_trials) {
+    trial_data <- process_trial(current_session, i, j)
+    if (!is.null(trial_data)) {
+      all_sessions_combined[[paste0("session", i, "_trial", j)]] <- trial_data
+    }
+  }
+}
+
+# Combine all trial summaries into one large data frame
+combined_df <- bind_rows(all_sessions_combined)
+
+# Check the integrated data
+str(combined_df)
+```
+
+## Descriptive Statistics
+
+### Behavioral Data Analysis
+```{r, echo=FALSE, fig.align="center"}
+# Convert to long format for left and right contrasts
+combined_df_long <- combined_df %>%
+  pivot_longer(cols = c(contrast_left, contrast_right), 
+               names_to = "contrast_side", 
+               values_to = "contrast_value")
+
+# Create the faceted bar plot
+ggplot(combined_df_long, aes(x = factor(contrast_value), fill = factor(feedback_type))) +
+  geom_bar(position = "dodge") +
+  facet_wrap(~ contrast_side, ncol = 2) +
+  labs(title = "Distribution of Contrast by Feedback Type",
+       x = "Contrast Value",
+       y = "Count",
+       fill = "Feedback\n(1 = Success, -1 = Failure)") 
+```
+The faceted bar plots show that there’s no significant difference in the distributions of contrast on the left versus right—indicating that mice do not exhibit a bias toward one side over the other. However, when the contrast is 0, there's a notably higher success rate. This suggests that in trials with no stimulus, the mice are better at staying still on their wheel, which may imply that the task of remaining motionless is easier or more natural for them compared to making a directional movement.
+
+```{r, include=FALSE}
+# Calculate the proportion of successful trials for each combination of contrast levels
+success_by_contrast <- combined_df %>%
+  group_by(contrast_left, contrast_right) %>%
+  summarize(
+    total_trials = n(),
+    success_count = sum(feedback_type == 1),
+    success_rate = success_count / total_trials,
+    .groups = "drop" #Added
+  )
+
+# Print results
+print(success_by_contrast)
+```
+
+```{r, echo=FALSE, fig.align="center"}
+# Create a heatmap
+ggplot(success_by_contrast, aes(x = as.factor(contrast_left), y = as.factor(contrast_right), fill = success_rate)) +
+  geom_tile() +
+  scale_fill_gradient() +
+  labs(title = "Success Rate by Contrast Levels",
+       x = "Left Contrast",
+       y = "Right Contrast",
+       fill = "Success Rate")
+```
+
+This heatmap displays success rates as a function of the left and right contrast levels. Notably, the highest success rates occur when both contrasts are near 0 (when there is minimal or no stimulus). This suggests that the mice perform best under no-stimulus conditions, potentially because the task of remaining still is easier than executing a directional response. Alternatively, this pattern might indicate that, over the course of many sessions, the mice become fatigued or less responsive when required to respond to stronger stimuli. Further analysis—such as controlling for session order or examining additional behavioral metrics—could help clarify whether fatigue, stimulus ambiguity, or another factor is driving this effect.
+
+```{r, include=FALSE}
+# Create a binary success variable
+combined_df <- combined_df %>%
+  mutate(success = ifelse(feedback_type == 1, 1, 0))
+
+# For stimulated trials (any non-zero contrast)
+stimulated_data <- combined_df %>%
+  filter(!(contrast_left == 0 & contrast_right == 0)) %>%
+  group_by(session_id) %>%
+  summarise(success_rate = mean(success), .groups = "drop")
+
+# Fit simple linear models to see the trend over sessions
+lm_stim <- lm(success_rate ~ session_id, data = stimulated_data)
+
+# View model summaries
+summary(lm_stim)
+```
+
+```{r, echo=FALSE, fig.align="center"}
+# Plot the trends for visual inspection
+
+# Stimulated trials trend
+ggplot(stimulated_data, aes(x = session_id, y = success_rate)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = FALSE, color = "slateblue1") +
+  labs(title = "Success Rate Over Sessions for Stimulated Trials",
+       x = "Session ID",
+       y = "Success Rate") 
+```
+The linear trend in stimulated trials indicates that the success rate increases over sessions. This suggests that, rather than showing signs of fatigue, the mice appear to be learning and adapting to the task. As sessions progress, they become more proficient at processing the visual stimuli and executing the correct responses. In other words, repeated exposure to the task conditions seems to enhance their alertness and responsiveness, leading to improved performance over time. This finding supports the idea that cognitive adaptation, rather than fatigue, plays a key role in how effectively the mice respond to the experiment.
+
+```{r, include=FALSE}
+# Contrast Left
+summary(session[[1]]$contrast_left)
+table(session[[1]]$contrast_left)
+length(session[[1]]$contrast_left) # Number of trials
+
+# Contrast Right
+summary(session[[1]]$contrast_right)
+table(session[[1]]$contrast_right)
+length(session[[1]]$contrast_right) # Number of trials
+
+# Feedback Type
+summary(session[[1]]$feedback_type)
+table(session[[1]]$feedback_type)
+```
+
+```{r, include=FALSE}
+typeof(session[[1]]$spks) # List
+length(session[[1]]$spks) # Number of trials
+
+dim(session[[1]]$spks[[10]]) # dimensions of spike matrix in trial 10 (neurons x time bins)
+length(session[[1]]$spks[[10]][5,]) # Number of time bins for the 5th neuron in trial 10
+
+typeof(session[[1]]$time) # List
+session[[1]]$time[[10]] # Time bins for trial 10
+
+session[[1]]$feedback_type[10] # Feedback for trial 10
+session[[1]]$contrast_left[10]  # Left contrast for trial 10
+session[[1]]$contrast_right[10] # Right contrast for trial 10
+```
+
+```{r, include=FALSE}
+# Process a Single Trial
+process_trial <- function(session_data, session_id, trial_id) {
+  brain_areas <- session_data$brain_area
+  spks_matrix <- session_data$spks[[trial_id]]
+
+  # Create a tibble for the trial
+  trial_df <- tibble(
+    brain_area = brain_areas,
+    total_spikes = rowSums(spks_matrix),  # Total spikes for each neuron
+    neuron_id = 1:length(brain_areas)  # Unique ID for each neuron
+  )
+
+  # Aggregate by brain area
+  trial_summary <- trial_df %>%
+    group_by(brain_area) %>%
+    summarize(
+      region_sum_spike = sum(total_spikes),
+      region_count = n(),  # Number of neurons in the region
+      region_mean_spike = mean(total_spikes), # Average spikes/neuron
+      .groups = "drop"  # Added for dplyr 1.0.0 compatibility
+    ) %>%
+    mutate(
+      session_id = session_id,
+      trial_id = trial_id,
+      contrast_left = session_data$contrast_left[trial_id],
+      contrast_right = session_data$contrast_right[trial_id],
+      feedback_type = session_data$feedback_type[trial_id],
+      mouse_name = session_data$mouse_name #Added mouse name
+    )
+
+  return(trial_summary)
+}
+
+# Process All Sessions and Trials
+all_sessions_combined <- list()
+
+for (i in 1:length(session)) {
+  n_trials <- length(session[[i]]$feedback_type)  # Number of trials in the session
+  for (j in 1:n_trials) {
+    trial_data <- process_trial(session[[i]], i, j)
+    if (!is.null(trial_data)) { # Add only if not NULL
+        all_sessions_combined[[paste0("session", i, "_trial", j)]] <- trial_data
+    }
+  }
+}
+
+# Combine all trial data into a single data frame
+combined_df <- bind_rows(all_sessions_combined)
+
+# Result
+print(head(combined_df))
+str(combined_df)
+```
+
+## Analyzing All Sessions
+
+### Univariate Analysis: Feedback Type
+
+```{r, include=FALSE}
+# Create a summary dataframe
+df.count <- combined_df %>%
+  group_by(mouse_name, feedback_type) %>%
+  summarize(n = n(), .groups = "drop") %>% # Added .groups="drop"
+  mutate(feedback_type = ifelse(feedback_type == 1, "Success", "Failure"))
+# Print the summary dataframe
+print(df.count)
+```
+
+```{r, echo=FALSE, fig.align="center"}
+# Create a bar plot
+ggplot(df.count, aes(x = mouse_name, y = n, fill = feedback_type)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(title = "Number of Successful and Failed Trials for Each Mouse",
+       x = "Mouse Name",
+       y = "Count",
+       fill = "Feedback Type") 
+```
+The bar plots reveal that while all four species exhibit more successful than failed trials, the magnitude of the success–failure gap varies noticeably by species. Specifically, Lederberg and Hench display a much larger gap (with Lederberg having the highest success rate), whereas Cori and Forssman show smaller gaps, with Cori having the lowest overall success rate. This naturally raises the question: Why do these species perform differently?
+
+```{r, echo=FALSE, fig.align="center"}
+# Box plot: Compare neural firing rates across mouse species
+ggplot(combined_df, aes(x = mouse_name, y = region_mean_spike, fill = mouse_name)) +
+  geom_boxplot() +
+  labs(title = "Neural Firing Rates by Mouse Species",
+       x = "Mouse Species",
+       y = "Average Spike Rate") 
+```
+The box plot shows that the central tendencies (medians) of the average spike rates are pretty similar across the species. However, the ranking based on median or mean firing rates appears to be: Forssman (smallest) < Hench < Lederberg < Cori (largest). Additionally, the spread of the data (as shown by the span and interquartile range) is largest for Hench and smallest for Forssman.
+
+This analysis suggests that while the overall firing rates are similar, the variability differs notably among species. Such differences in spread may point to variations in neural circuitry or cognitive processing between species, potentially explaining why some species perform better on the task than others.
+
+### Analysis of Neural Activity: Brain Area Distribution
+```{r, include=FALSE}
+# Count occurrences of each brain area
+brain_area_counts <- combined_df %>%
+  group_by(brain_area) %>%
+  summarize(count = n(), .groups = "drop") %>% #Count rows, not unlist
+  arrange(desc(count))
+
+brain_area_counts
+# Plot top N brain areas
+top_n <- 10 # Number of top brain areas to plot
+top_brain_area_df <- head(brain_area_counts, top_n)
+```
+
+```{r, echo=FALSE, fig.align="center"}
+ggplot(top_brain_area_df, aes(x = reorder(brain_area, count), y = count)) +
+  geom_bar(stat = "identity") +
+  coord_flip() + # Horizontal bars for better readability
+  labs(title = paste("Top", top_n, "Brain Areas (Across All Trials)"),
+       x = "Brain Area",
+       y = "Count")
+```
+
+**ACA CA3 DG LS MOs root SUB VISp**: These are the abbreviations for the brain areas recorded in this session:
+**ACA**: Anterior Cingulate Area
+**CA3**: A region of the hippocampus
+**DG**: Dentate Gyrus (part of the hippocampus)
+**LS**: Lateral Septum
+**MOs**: Secondary Motor Cortex
+**root**: Likely neurons whose location couldn't be precisely assigned to a specific named area
+**SUB**: Subiculum (part of the hippocampus)
+**VISp**: Primary Visual Cortex
+
+#### Interpretation:
+
+**Hippocampal Involvement**: CA1, DG, and CA3 are all parts of the hippocampus, which is involved in learning / memory. Their presence suggests that the task may involve some learning or memory component (learning the association between the stimulus and the correct response).
+
+**Visual and Motor Pathways**: The high counts for VISp, LGd, and MOs are expected, given the task. This confirms that the recordings are from brain areas relevant to the task.
+
+**Higher-Order Cognitive Processes**: The presence of PL suggests involvement of prefrontal cortex, indicating that the task may involve decision-making processes beyond simple stimulus-response.
+
+I hypothesize that activity in VISp, MOs, and the hippocampal regions (CA1, CA3, DG) will be significantly predictive of trial outcome.
+I hypothesize that activity in CA1, CA3, and DG will show changes over time that correlate with the mouse's learning of the task.
+
+### Analysis of Neural Activity: Average firing rates for each brain area
+
+```{r, include=FALSE}
+# Group by session and brain area to calculate mean firing rates
+mean_firing_rates <- combined_df %>%
+  group_by(session_id, brain_area) %>%
+  summarize(mean_firing_rate = mean(region_mean_spike, na.rm = TRUE), .groups = "drop")
+
+# Print mean firing rates
+print(mean_firing_rates)
+```
+
+Based on my hypothesis that activity in CA1, CA3, and DG will show changes over time that correlate with the mouse's learning of the task, I will create a plot.
+
+```{r, echo=FALSE, fig.align="center"}
+# Filter for the brain areas of interest
+areas_of_interest <- c("CA1", "CA3", "DG")
+learning_firing_rates <- mean_firing_rates %>%
+  filter(brain_area %in% areas_of_interest)
+
+# Create a line plot for mean firing rates over sessions
+ggplot(learning_firing_rates, aes(x = session_id, y = mean_firing_rate, color = brain_area)) +
+  geom_line(size = 1) +
+  geom_point(size = 2) +
+  labs(title = "Mean Firing Rates Over Sessions for CA1, CA3, and DG",
+       x = "Session ID",
+       y = "Mean Firing Rate",
+       color = "Brain Area") 
+```
+The three hippocampal regions show quite distinct patterns over sessions. The Dentate Gyrus (DG) exhibits a high level of activity in the early sessions—a sharp initial spike—but then declines and fails to reach the same peak in later sessions. This could suggest that DG is highly engaged during the initial exposure to the task, perhaps to facilitate early pattern separation or encoding of novel stimuli, but its role diminishes as the task becomes more familiar. 
+
+In contrast, CA1 maintains relatively consistent activity levels, with moderate fluctuations from session to session. This stability might indicate that CA1 serves as a reliable integrator of information throughout the learning process, reflecting a steady state of hippocampal output. 
+
+Meanwhile, CA3 demonstrates a volatile pattern: its activity fluctuates, culminating in a pronounced spike and jump at Session 15 followed by a dramatic drop. This surge could represent a transient phase where CA3 is intensely involved in associative processing or memory consolidation, after which its activity plummets—possibly reflecting a shift in neural strategy or synaptic reorganization as the mice consolidate their learning.
+
+Overall, these patterns suggest that while all three regions are involved in the learning process, they may contribute in different ways. DG's early high activity might be critical for initial learning and encoding, CA1’s steady output could reflect consistent processing of information, and CA3’s erratic behavior may point to its role in dynamic memory retrieval or network reorganization at key learning junctures. 
+
+### Time Series Analysis
+
+```{r, include=FALSE}
+# Get the functional data
+get_trail_functional_data <- function(session_id, trail_id, all_sessions_list){
+  spikes <- all_sessions_list[[session_id]]$spks[[trail_id]]
+  trail_bin_average <- matrix(colMeans(spikes), nrow = 1)
+  binename <- paste0("bin", as.character(1:ncol(spikes))) # Dynamically get number of bins
+  colnames(trail_bin_average) <- binename
+  trail_tibble  = as_tibble(trail_bin_average) %>%
+                  add_column("trail_id" = trail_id) %>%
+                  add_column("contrast_left"= all_sessions_list[[session_id]]$contrast_left[trail_id]) %>%
+                  add_column("contrast_right"= all_sessions_list[[session_id]]$contrast_right[trail_id]) %>%
+                  add_column("feedback_type"= all_sessions_list[[session_id]]$feedback_type[trail_id])
+
+  trail_tibble
+}
+
+get_session_functional_data <- function(session_id, all_sessions_list){
+  n_trail <- length(all_sessions_list[[session_id]]$spks)
+  trail_list <- list()
+  for (trail_id in 1:n_trail){
+    trail_tibble <- get_trail_functional_data(session_id,trail_id, all_sessions_list)
+    trail_list[[trail_id]] <- trail_tibble
+  }
+  session_tibble <- as_tibble(do.call(rbind, trail_list))
+  session_tibble <- session_tibble %>% add_column("mouse_name" = all_sessions_list[[session_id]]$mouse_name) %>% add_column("date_exp" = all_sessions_list[[session_id]]$date_exp) %>% add_column("session_id" = session_id)
+  session_tibble
+}
+
+session_list = list()
+for (session_id in 1: 18){
+  session_list[[session_id]] <- get_session_functional_data(session_id, session)
+}
+all_sessions_functional_df <- as_tibble(do.call(rbind, session_list)) #Combine all functional data
+
+# Convert to long format for easier plotting
+functional_long <- all_sessions_functional_df %>%
+  pivot_longer(cols = starts_with("bin"),
+               names_to = "time_bin",
+               values_to = "spike_rate") %>%
+    mutate(time_bin = as.numeric(gsub("bin", "", time_bin)) * 0.01) # Convert bin to seconds
+```
+
+```{r, echo=FALSE, fig.align="center"}
+# Plot average time course for success and failure trials, faceted by session
+ggplot(functional_long, aes(x = time_bin, y = spike_rate, color = as.factor(feedback_type))) +
+  stat_summary(fun = mean, geom = "line", linewidth = 1) +  # Average across trials
+  stat_summary(fun.data = mean_se, geom = "ribbon", alpha = 0.2, aes(fill = as.factor(feedback_type)), show.legend = FALSE) + # Standard error ribbon
+  facet_wrap(~ session_id, scales = "free_y") +  # Separate plots for each session
+  labs(title = "Average Time Course of Neural Activity (Binned)",
+       x = "Time (seconds)",
+       y = "Average Spike Rate",
+       color = "Feedback Type") +
+    scale_color_discrete(name = "Feedback", labels = c("Failure", "Success"))+
+    scale_fill_discrete(name = "Feedback", labels = c("Failure", "Success"))
+```
+
+**Overall Shape**: In most of the graphs, the failure and successes have similar shapes, the successes. tend to just have a bit higher average spike rates.
+**Differences between Success and Failure**: In general, the successes seem to have higher peaks and consistently be larger than the failures.
+**Session-to-Session Consistency**: The time courses look similar across different sessions, with the average spike rates generally increasing, the rates just differ from time to time.
+
+The plot indicates that while the basic timing of neural responses is consistent (indicating a common processing pathway), the amplitude of these responses is higher in successful trials. This supports the hypothesis that a more vigorous neural activation might underlie better performance on the task. The consistency across sessions further suggests that these patterns are robust and intrinsic to the task rather than being driven by random fluctuations or external factors.
+
+### Session-to-Session Variability
+
+```{r, include=FALSE}
+# Behavioral Variability (Success Rate)
+
+session_summary <- combined_df %>%
+  group_by(session_id, mouse_name) %>%
+  summarize(
+    success_rate = mean(feedback_type == 1),
+    n_trials = n_distinct(trial_id),
+    .groups = "drop"
+  )
+```
+
+```{r, echo=FALSE, fig.align="center"}
+# Plot success rate across sessions
+ggplot(session_summary, aes(x = session_id, y = success_rate, color = mouse_name, group = mouse_name)) +
+  geom_line() +
+  geom_point() +
+  labs(title = "Success Rate Across Sessions",
+       x = "Session ID",
+       y = "Success Rate",
+       color = "Mouse") +
+  ylim(0, 1) # Ensure y-axis ranges from 0 to 1
+```
+
+```{r, include=FALSE}
+print(session_summary)
+
+# 2. Neural Variability (Average Firing Rate)
+
+# Calculate average firing rate per session & brain area
+session_brain_summary <- combined_df %>%
+  group_by(session_id, mouse_name, brain_area) %>%
+  summarize(mean_firing_rate = mean(region_mean_spike, na.rm = TRUE), .groups = "drop")
+```
+
+The four types of mice had different patterns.
+*Cori* was generally linearly growing.
+*Forssmann* went down, then jumped up, then went down again.
+*Hench* went up, went down, and then jumped up for a multiple sessions.
+*Lederberg* kept switching between going up and down, most recently going up.
+
+
+# Data Integration
+
+```{r, include=FALSE}
+# Pivot the combined_df so that each trial is one row and each brain area's mean spike rate is a column
+neural_wide <- combined_df %>%
+  pivot_wider(names_from = brain_area, values_from = region_mean_spike)
+
+# Check the dimensions and structure
+print(head(neural_wide))
+str(neural_wide)
+
+# Select only neural features by removing metadata columns
+neural_features <- neural_wide %>% 
+  select(-session_id, -trial_id, -contrast_left, -contrast_right, -feedback_type, -mouse_name)
+
+# Impute missing values with median for each column
+impute_median <- function(x) {
+  if(is.numeric(x)) {
+    med <- median(x, na.rm = TRUE)
+    x[is.na(x)] <- med
+  }
+  return(x)
+}
+
+neural_features_imputed <- neural_features %>% mutate_all(impute_median)
+
+# Optionally, remove any near-zero variance columns after imputation
+nzv <- nearZeroVar(neural_features_imputed)
+if(length(nzv) > 0){
+  neural_features_imputed <- neural_features_imputed[ , -nzv, drop = FALSE]
+}
+
+# Perform PCA on the imputed neural features with scaling
+pca_result <- prcomp(neural_features_imputed, scale. = TRUE)
+summary(pca_result)
+
+# Bind the first two principal components back to the wide data along with metadata
+pca_df <- neural_wide %>%
+  mutate(
+    PC1 = pca_result$x[,1],
+    PC2 = pca_result$x[,2],
+    feedback_type = factor(feedback_type)
+  )
+```
+
+```{r, echo=FALSE, fig.align="center"}
+# Plot the PCA results
+ggplot(pca_df, aes(x = PC1, y = PC2, color = feedback_type)) +
+  geom_point(alpha = 0.5) +
+  labs(title = "PCA of Neural Firing Rates (After Median Imputation)",
+       x = "Principal Component 1",
+       y = "Principal Component 2",
+       color = "Feedback Type")
+```
+
+**Principal Component Analysis (PCA) Interpretation:**
+The PCA plot shows that trials labeled as success (1) and failure (-1) are largely interspersed across the first two principal components, indicating that these two dimensions do not strongly separate outcomes. This overlapping distribution suggests that:
+
+*Dominant Sources of Variance*: The largest sources of variability in the neural firing rates (captured by PC1 and PC2) are driven by factors other than success vs. failure—potentially session differences, discrete firing patterns in certain brain areas, or other unaccounted variables.
+
+*Potential Data Artifacts*: The “striping” along PC1 and PC2 indicates that the data may have discrete values or be heavily influenced by median imputation. Some brain areas might only be recorded in certain trials, creating chunks or stripes in the PCA space.
+
+# Model Testing
+I will now test 10 different models to see which works best for this data. I will use the original neural features as the feature set.
+
+```{r}
+combined_df <- combined_df %>%
+  mutate(success = ifelse(feedback_type == 1, 1, 0))
+
+# Split combined_df into training (80%) and test (20%) sets.
+set.seed(141)
+train_index <- createDataPartition(combined_df$success, p = 0.8, list = FALSE)
+training_data <- combined_df[train_index, ]
+test_data <- combined_df[-train_index, ]
+
+# Ensure success is a factor
+training_data$success <- factor(training_data$success, levels = c(0, 1))
+test_data$success <- factor(test_data$success, levels = c(0, 1))
+
+# Create training_features and test_features by removing metadata columns.
+# Adjust columns to drop based on data structure.
+training_features <- training_data %>% 
+  select(-session_id, -trial_id, -contrast_left, -contrast_right, -feedback_type, -mouse_name)
+test_features <- test_data %>% 
+  select(-session_id, -trial_id, -contrast_left, -contrast_right, -feedback_type, -mouse_name)
+
+# Check that objects exist:
+dim(training_features)
+dim(test_features)
+```
+
+```{r, include=FALSE}
+# logistic regression model
+set.seed(141)
+log_model <- train(success ~ ., 
+                   data = training_features, 
+                   method = "glm", 
+                   family = "binomial", 
+                   trControl = trainControl(method = "cv", number = 5))
+pred_log <- predict(log_model, newdata = test_features)
+cm_log <- confusionMatrix(pred_log, test_features$success)
+print(cm_log)
+```
+The accuracy of *logistic regression* model is **0.7075**
+
+```{r, include=FALSE}
+# lasso model
+set.seed(141)
+lasso_model <- train(success ~ ., 
+                     data = training_features, 
+                     method = "glmnet", 
+                     family = "binomial", 
+                     trControl = trainControl(method = "cv", number = 5))
+pred_lasso <- predict(lasso_model, newdata = test_features)
+cm_lasso <- confusionMatrix(pred_lasso, test_features$success)
+print(cm_lasso)
+```
+The accuracy of *lasso* model is **0.7075**
+
+```{r, include=FALSE}
+# decision tree model
+set.seed(141)
+tree_model <- train(success ~ ., 
+                    data = training_features, 
+                    method = "rpart", 
+                    trControl = trainControl(method = "cv", number = 5))
+pred_tree <- predict(tree_model, newdata = test_features)
+cm_tree <- confusionMatrix(pred_tree, test_features$success)
+print(cm_tree)
+```
+
+The accuracy of *decision tree* model is **0.7075**
+
+```{r, include=FALSE}
+# gradient boost model
+set.seed(141)
+gbm_model <- train(success ~ ., 
+                   data = training_features, 
+                   method = "gbm", 
+                   verbose = FALSE,
+                   trControl = trainControl(method = "cv", number = 5))
+pred_gbm <- predict(gbm_model, newdata = test_features)
+cm_gbm <- confusionMatrix(pred_gbm, test_features$success)
+print(cm_gbm)
+```
+
+The accuracy of *gradient boost* model is **0.7075**
+
+```{r, include=FALSE}
+# k-nearest model
+set.seed(141)
+knn_model <- train(success ~ ., 
+                   data = training_features, 
+                   method = "knn", 
+                   trControl = trainControl(method = "cv", number = 5))
+pred_knn <- predict(knn_model, newdata = test_features)
+cm_knn <- confusionMatrix(pred_knn, test_features$success)
+print(cm_knn)
+```
+The accuracy of *k-Nearest Neighbors* model is **0.6881**
+
+
+The fact that logistic regression, lasso, decision tree, and gradient boosting all reached an accuracy of 70.75% suggests that these models are capturing a similar underlying pattern in the data. They appear to be converging on a baseline level of predictive power with the current features. In contrast, k-nearest neighbor (KNN) achieved a slightly lower accuracy of 68.81%, which may be due to its sensitivity to local data structure and noise—especially in high-dimensional or less well-separated feature spaces. This could also indicate that the choice of distance metric or the number of neighbors in KNN is not optimal for the dataset. Overall, these results imply that the predictive signal in the features is modest, and simpler linear models (or models with similar decision boundaries) are sufficient, whereas KNN may be more adversely affected by the data’s characteristics.
+
+
+## Test Data
+Given the test data, it is time to find the accuracies with the new data.
+
+```{r, include=FALSE}
+# test file paths
+test_files <- c("./test/test1.rds", "./test/test2.rds")
+
+# processed test sessions
+test_sessions <- list()
+
+# process each test file similarly to training files
+for (i in seq_along(test_files)) {
+  session <- readRDS(test_files[[i]])
+  n_trials <- length(session$feedback_type)
+  for (j in 1:n_trials) {
+    trial_data <- process_trial(session, i, j)  # using existing function
+    if (!is.null(trial_data)) {
+      test_sessions[[paste0("test", i, "_trial", j)]] <- trial_data
+    }
+  }
+}
+
+# combine all test trial data into one data frame
+test_combined_df <- bind_rows(test_sessions)
+
+# integrated test data
+print(head(test_combined_df))
+str(test_combined_df)
+```
+
+```{r, include=FALSE}
+test_features <- test_combined_df %>% 
+  select(-session_id, -trial_id, -contrast_left, -contrast_right, -feedback_type, -mouse_name)
+
+test_combined_df <- test_combined_df %>% mutate(success = ifelse(feedback_type == 1, 1, 0))
+test_features$success <- test_combined_df$success
+```
+
+```{r, include=FALSE}
+# log reg
+pred_log <- factor(pred_log, levels = c(0, 1))
+test_features$success <- factor(test_features$success, levels = c(0, 1))
+
+# confusion matrix
+cm_log <- confusionMatrix(pred_log, test_features$success)
+print(cm_log)
+```
+The accuracy for *logistic regression* on the test data is **0.7256**
+
+```{r, include=FALSE}
+# lasso
+pred_lasso <- predict(lasso_model, newdata = test_features)
+
+# confusion matrix
+cm_lasso <- confusionMatrix(pred_lasso, test_features$success)
+print(cm_lasso)
+```
+
+The accuracy for *lasso* on the test data is **0.7256**
+
+```{r, include=FALSE}
+# decision tree model
+pred_tree <- predict(tree_model, newdata = test_features)
+
+# confusion matrix
+cm_tree <- confusionMatrix(pred_tree, test_features$success)
+print(cm_tree)
+```
+
+The accuracy for *decision tree* on the test data is **0.7256**
+
+```{r, include=FALSE}
+# gradient boosting model
+pred_gbm <- predict(gbm_model, newdata = test_features)
+
+# confusion matrix
+cm_gbm <- confusionMatrix(pred_gbm, test_features$success)
+print(cm_gbm)
+```
+
+The accuracy for *gradient boosting* on the test data is **0.7256**
+
+```{r, include=FALSE}
+# k-nearest neighbor
+pred_knn <- predict(knn_model, newdata = test_features)
+
+pred_knn <- factor(pred_knn, levels = c(0, 1))
+test_features$success <- factor(test_features$success, levels = c(0, 1))
+
+# confusion matrix
+cm_knn <- confusionMatrix(pred_knn, test_features$success)
+print(cm_knn)
+```
+
+The accuracy for *k-nearest* on the test data is **0.6978**
+
+### Interpretation
+
+These findings indicate that logistic regression, lasso, decision tree, and gradient boosting are all performing equally well on the test data, achieving an accuracy of 72.56%. This suggests that the underlying predictive signal in the neural features is captured similarly by these models—despite their differences in complexity—and that the relationships between the predictors and the outcome may be largely linear or straightforward.
+
+In contrast, the k-nearest neighbors model, which relies on local distances, achieves a lower accuracy (69.78%). This means that k-nearest neighbors is more sensitive to the data's local structure and noise, especially in a potentially high-dimensional feature space where distance metrics can become less informative.
+
+Overall, these results imply that the current feature set provides a moderate predictive signal and that simpler, more interpretable models (like logistic regression) or those that capture non-linearity in a similar manner (like decision trees and gradient boosting) are preferable for this dataset.
+
+# Conclusion
+In this project, I integrated neural firing rate data and behavioral metrics across multiple sessions to explore whether neural activity can predict decision outcomes in mice. My analysis followed these key steps:
+
+### Data Integration & EDA:
+I processed and combined data from 18 sessions, creating a single comprehensive dataset. The exploratory analysis revealed that while the overall neural firing patterns were generally similar across trials, subtle differences emerged—especially when comparing trials with and without stimulus. This raised questions about whether the mice were learning or perhaps experiencing fatigue.
+
+### PCA:
+I applied principal component analysis on the neural features to visualize the data structure. Although the PCA plot did not reveal clearly separable clusters between successful and failed trials, it suggested that the major sources of variability in neural activity might be driven by factors other than trial outcome. This indicated that the predictive signal in the current features is modest.
+
+### Model Testing:
+I evaluated multiple predictive models using the original neural features, including logistic regression, lasso regression, decision trees, gradient boosting, and k-nearest neighbors. On the test data, logistic regression, lasso, decision tree, and gradient boosting all achieved an accuracy of 72.56%, while the k-nearest neighbors model reached 69.78%.
+These results suggest that the predictive signal in the dataset is relatively modest and that even simple linear models can capture the underlying relationship between neural activity and trial outcomes. The similar performance of these diverse models further implies that the relationship may be predominantly linear or that the current features capture a common baseline pattern. The slightly lower performance of k-nearest neighbors indicates that distance-based methods might be less effective in this context, possibly due to high-dimensional noise or subtle class boundaries.
+
+## Final Thoughts and Next Steps
+Interpretation:
+The overall performance of around 72.5% accuracy demonstrates that there is a moderate predictive signal in the neural data. However, the similar performance across different modeling approaches indicates that there is room for improvement. The absence of clear separation in the PCA plot suggests that additional feature engineering might help uncover more nuanced differences related to trial outcomes.
+
+In summary, while the current analysis shows a moderate ability to predict decision outcomes based on neural activity, further refinement in data representation and model complexity may lead to improved performance and a deeper understanding of the neural mechanisms underlying decision-making in mice
+
+
+# Acknowledgement
+I used generative AI on this project to test out different models and see the accuracies. I also used it to debug and learn how to make models. I used gemini and chatgpt. Here is a link to a chat: https://chatgpt.com/share/67d8a986-5950-800c-9c6d-8cca29c6f253
+
+Also, this was my first time ever doing a full data science project and report. This was a very interesting and informative experience. Thank you for making STA 141A a great learning experience! :)
